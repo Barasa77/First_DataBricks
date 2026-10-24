@@ -1,0 +1,11 @@
+# Dashboard AI/BI "Projeto Farol · Portfólio": lê a gold que o job recalcula toda segunda.
+# O JSON é gerado por scripts/gerar_dashboard.py. Não edite no workspace: mude o script e gere de novo.
+resources:
+  dashboards:
+    dashboard_portfolio:
+      display_name: "Projeto Farol · Portfólio"
+      file_path: ./dashboard-portfolio.lvdash.json
+      # as queries da gold usam o nome puro da tabela: catálogo e schema vêm daqui
+      dataset_catalog: ${var.catalog}
+      dataset_schema: gold
+      warehouse_id: ${var.warehouse_id}

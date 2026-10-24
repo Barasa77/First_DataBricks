@@ -1,0 +1,98 @@
+# Job vertice_farol: a Torre de Controle roda sozinha toda segunda às 6h (no dev, pausado pelo preset).
+#
+#   ingestao_feriados ──┐
+#                       ├── conferencia_bronze ── medalhao ──┬── testes_de_qualidade ──┐
+#   ingestao_data_lake ─┘                                    └── status_com_ia ────────┴── metricas_governadas
+#
+# 1. ingestao_feriados    notebook: BrasilAPI → bronze.feriados
+# 2. ingestao_data_lake   notebook: Supabase Storage (boto3) → volume bronze.raw → 9 tabelas bronze
+# 3. conferencia_bronze   sql_task: confere as 9 tabelas contra a contagem esperada (seed 42)
+# 4. medalhao             pipeline vertice_medalhao: bronze → silver (7) → gold (3)
+# 5. testes_de_qualidade  sql_task: 10 testes de silver e gold, raise_error se algum falhar
+# 6. status_com_ia        sql_task: gold.status_estruturado, causa do bloqueio tirada do texto (MERGE incremental)
+# 7. metricas_governadas  sql_task: metric view gold.mv_projetos (KPIs da carteira, lidos pelo Genie e pelo app)
+resources:
+  jobs:
+    vertice_farol:
+      name: vertice_farol
+      # toda segunda às 6h, horário de Brasília
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * MON"
+        timezone_id: America/Sao_Paulo
+      tasks:
+        # BrasilAPI → bronze.feriados
+        - task_key: ingestao_feriados
+          notebook_task:
+            notebook_path: ../src/ingestao/01_ingestao_api_gabarito.py
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+
+        # Supabase Storage (boto3) → volume bronze.raw → 9 tabelas bronze
+        - task_key: ingestao_data_lake
+          environment_key: Default
+          notebook_task:
+            base_parameters:
+              AWS_ACCESS_KEY_ID: ${var.s3_access_key_id}
+              AWS_DEFAULT_REGION: us-east-2
+              AWS_SECRET_ACCESS_KEY: ${var.s3_secret_access_key}
+              S3_ENDPOINT: https://pkltmeyovfyrreftybsp.storage.supabase.co/storage/v1/s3
+            notebook_path: ../src/ingestao/02_ingestao_boto3_gabarito.py
+          run_if: ALL_SUCCESS
+          timeout_seconds: 0
+
+        # Confere as 9 tabelas da bronze contra a contagem esperada (seed 42)
+        - task_key: conferencia_bronze
+          depends_on:
+            - task_key: ingestao_feriados
+            - task_key: ingestao_data_lake
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/conferencia/00-conferencia-bronze.sql
+
+        # Pipeline declarativo: bronze → silver
+        - task_key: medalhao
+          depends_on:
+            - task_key: conferencia_bronze
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.vertice_medalhao.id}
+
+        # 10 testes de qualidade sobre silver e gold (raise_error se algum falhar)
+        - task_key: testes_de_qualidade
+          depends_on:
+            - task_key: medalhao
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/testes/testes.sql
+
+        # Texto livre do status → causa do bloqueio (IA só nos últimos 90 dias, MERGE incremental)
+        - task_key: status_com_ia
+          depends_on:
+            - task_key: medalhao
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/ia/status_estruturado.sql
+
+        # Métricas governadas: a metric view gold.mv_projetos (a fórmula de cada KPI num lugar só)
+        - task_key: metricas_governadas
+          depends_on:
+            - task_key: testes_de_qualidade
+            - task_key: status_com_ia
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ../src/metricas/metricas.sql
+
+      environments:
+        - environment_key: Default
+          spec:
+            environment_version: "6"
+      email_notifications:
+        no_alert_for_skipped_runs: false
+      max_concurrent_runs: 1
+      performance_target: PERFORMANCE_OPTIMIZED
+      queue:
+        enabled: true
+      timeout_seconds: 0
